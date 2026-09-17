@@ -15,81 +15,66 @@ jobs:
 
     steps:
 
-      # ==============================
-      # CHECKOUT
-      # ==============================
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ==============================
+      # --------------------------------
       # FIND ANDROID PROJECT
-      # ==============================
+      # --------------------------------
       - name: Find Android project
         shell: bash
         run: |
           set -e
 
-          PROJECT_DIR=""
+          PROJECT=""
 
-          if [ -f "android-wrapper/settings.gradle" ] && \
-             [ -f "android-wrapper/app/build.gradle" ]; then
-            PROJECT_DIR="android-wrapper"
+          if [ -f "settings.gradle" ] && [ -f "app/build.gradle" ]; then
+            PROJECT="."
           fi
 
-          if [ -z "$PROJECT_DIR" ] && \
-             [ -f "settings.gradle" ] && \
-             [ -f "app/build.gradle" ]; then
-            PROJECT_DIR="."
-          fi
+          if [ -z "$PROJECT" ]; then
+            ZIP=$(find . -maxdepth 3 -type f -name "*.zip" \
+              ! -path "./.git/*" | head -n 1)
 
-          if [ -z "$PROJECT_DIR" ]; then
-
-            ZIP_FILE=$(find . \
-              -maxdepth 3 \
-              -type f \
-              -name "*.zip" \
-              ! -path "./.git/*" \
-              | head -n 1)
-
-            if [ -z "$ZIP_FILE" ]; then
+            if [ -z "$ZIP" ]; then
               echo "ERROR: Android project ZIP not found."
               exit 1
             fi
 
-            echo "ZIP: $ZIP_FILE"
+            echo "Found project ZIP: $ZIP"
 
             rm -rf extracted
             mkdir -p extracted
 
-            unzip -q "$ZIP_FILE" -d extracted
+            unzip -q "$ZIP" -d extracted
 
-            PROJECT_DIR=$(find extracted \
+            PROJECT=$(find extracted \
               -type f \
               -name "settings.gradle" \
-              -print -quit \
-              | xargs -r dirname)
+              -print -quit | xargs -r dirname)
           fi
 
-          if [ -z "$PROJECT_DIR" ]; then
+          if [ -z "$PROJECT" ]; then
             echo "ERROR: settings.gradle not found."
             exit 1
           fi
 
-          if [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+          if [ ! -f "$PROJECT/app/build.gradle" ]; then
             echo "ERROR: app/build.gradle not found."
             exit 1
           fi
 
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
 
-          echo "Android project:"
-          echo "$PROJECT_DIR"
+          echo "================================"
+          echo "PROJECT FOUND"
+          echo "$PROJECT"
+          echo "================================"
 
 
-      # ==============================
+      # --------------------------------
       # JAVA 17
-      # ==============================
+      # --------------------------------
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -97,26 +82,35 @@ jobs:
           java-version: "17"
 
 
-      # ==============================
+      # --------------------------------
+      # GRADLE
+      # --------------------------------
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+
+      # --------------------------------
       # ANDROID SDK
-      # ==============================
+      # --------------------------------
       - name: Prepare Android SDK
         shell: bash
         run: |
           set -e
 
-          ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
 
-          if [ -z "$ANDROID_HOME" ]; then
+          if [ -z "$SDK" ]; then
             echo "ERROR: Android SDK not found."
             exit 1
           fi
 
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
 
-          SDKMANAGER=$(find "$ANDROID_HOME" \
+          SDKMANAGER=$(find "$SDK" \
             -type f \
-            -name "sdkmanager" \
+            -name sdkmanager \
             -print -quit || true)
 
           if [ -n "$SDKMANAGER" ]; then
@@ -128,71 +122,58 @@ jobs:
               "build-tools;35.0.0"
           fi
 
-          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_HOME/build-tools/35.0.0" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK/build-tools/35.0.0" >> "$GITHUB_PATH"
 
 
-      # ==============================
-      # GRADLE
-      # ==============================
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10.2"
-
-
-      # ==============================
+      # --------------------------------
       # CLEAN
-      # ==============================
+      # --------------------------------
       - name: Clean
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           gradle clean --no-daemon
 
 
-      # ==============================
+      # --------------------------------
       # BUILD RELEASE APK
-      # IMPORTANT:
-      # NO build.gradle MODIFICATION
-      # ==============================
+      # --------------------------------
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          gradle assembleRelease \
-            --no-daemon \
-            --stacktrace \
-            --no-build-cache
+          gradle assembleRelease --no-daemon --stacktrace
 
 
-      # ==============================
-      # FIND APK
-      # ==============================
-      - name: Find release APK
+      # --------------------------------
+      # LOCATE APK
+      # --------------------------------
+      - name: Locate APK
         shell: bash
         run: |
           set -e
 
-          APK=$(find \
-            "$PROJECT_DIR/app/build/outputs/apk/release" \
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
             -name "*.apk" \
-            -print -quit)
+            | grep "/release/" \
+            | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: No release APK generated."
+            echo "ERROR: Release APK was not created."
+            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+          echo "SOURCE_APK=$APK" >> "$GITHUB_ENV"
 
-          echo "APK FOUND:"
+          echo "Release APK:"
           echo "$APK"
 
 
-      # ==============================
+      # --------------------------------
       # CREATE SIGNING KEY
-      # ==============================
-      - name: Create APK signing key
+      # --------------------------------
+      - name: Create signing key
         shell: bash
         run: |
           set -e
@@ -201,94 +182,84 @@ jobs:
 
           keytool -genkeypair -v \
             -keystore signing/water-sort-jungle.jks \
+            -storetype JKS \
             -storepass WaterSortJungleStore \
             -keypass WaterSortJungleKey \
             -alias watersortjungle \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=Water Sort Jungle, OU=Game, O=Water Sort Jungle, L=India, ST=Uttar Pradesh, C=IN"
+            -dname "CN=Water Sort Jungle, OU=Game, O=Water Sort Jungle, L=India, ST=UP, C=IN"
+
+          echo "Signing key created."
 
 
-      # ==============================
-      # ALIGN APK
-      # ==============================
-      - name: Zipalign APK
-        shell: bash
-        run: |
-          set -e
-
-          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
-
-          if [ ! -f "$ZIPALIGN" ]; then
-            echo "ERROR: zipalign not found."
-            exit 1
-          fi
-
-          mkdir -p signed
-
-          "$ZIPALIGN" -f -p 4 \
-            "$APK_PATH" \
-            signed/Water-Sort-Jungle-aligned.apk
-
-
-      # ==============================
+      # --------------------------------
       # SIGN APK
-      # ==============================
+      # --------------------------------
       - name: Sign APK
         shell: bash
         run: |
           set -e
 
+          mkdir -p final
+
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+
+          if [ ! -f "$APKSIGNER" ]; then
+            echo "ERROR: apksigner not found."
+            exit 1
+          fi
 
           "$APKSIGNER" sign \
             --ks signing/water-sort-jungle.jks \
+            --ks-key-alias watersortjungle \
             --ks-pass pass:WaterSortJungleStore \
             --key-pass pass:WaterSortJungleKey \
-            --ks-key-alias watersortjungle \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out signed/Water-Sort-Jungle-Indus.apk \
-            signed/Water-Sort-Jungle-aligned.apk
+            --out final/Water-Sort-Jungle-Indus.apk \
+            "$SOURCE_APK"
+
+          echo "APK signed successfully."
 
 
-      # ==============================
+      # --------------------------------
       # VERIFY APK
-      # ==============================
-      - name: Verify final APK
+      # --------------------------------
+      - name: Verify APK
         shell: bash
         run: |
           set -e
 
-          FINAL="signed/Water-Sort-Jungle-Indus.apk"
+          APK="final/Water-Sort-Jungle-Indus.apk"
 
-          test -s "$FINAL"
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: Final APK is missing."
+            exit 1
+          fi
 
-          echo "Checking APK structure..."
-          unzip -t "$FINAL" >/dev/null
+          echo "Checking APK ZIP format..."
+          unzip -t "$APK" >/dev/null
 
           echo "Checking Android signature..."
 
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
             verify \
             --verbose \
-            "$FINAL"
+            "$APK"
 
-          echo "================================"
-          echo "APK FORMAT    : OK"
-          echo "APK SIGNATURE : OK"
-          echo "================================"
+          echo "========================================"
+          echo "APK FORMAT    : VALID"
+          echo "APK SIGNATURE : VALID"
+          echo "========================================"
 
 
-      # ==============================
-      # FINAL ARTIFACT
-      # ==============================
+      # --------------------------------
+      # UPLOAD ONLY APK
+      # --------------------------------
       - name: Upload Indus APK
         uses: actions/upload-artifact@v4
         with:
           name: Water-Sort-Jungle-Indus-APK
-          path: signed/Water-Sort-Jungle-Indus.apk
+          path: final/Water-Sort-Jungle-Indus.apk
           if-no-files-found: error
           retention-days: 30
