@@ -15,81 +15,86 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------
-      # 1. DOWNLOAD PROJECT
-      # --------------------------------------------------
+      # ==============================
+      # 1. CHECKOUT
+      # ==============================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
+
+      # ==============================
       # 2. FIND ANDROID PROJECT
-      # --------------------------------------------------
+      # ==============================
       - name: Find Android project
         shell: bash
         run: |
           set -e
 
-          PROJECT=""
+          PROJECT_DIR=""
 
-          # Your project ZIP may already be extracted
+          # Your ZIP/project structure
           if [ -f "android-wrapper/settings.gradle" ] && \
              [ -f "android-wrapper/app/build.gradle" ]; then
-            PROJECT="android-wrapper"
+            PROJECT_DIR="android-wrapper"
           fi
 
-          # Also check root
-          if [ -z "$PROJECT" ] && \
+          # Root project
+          if [ -z "$PROJECT_DIR" ] && \
              [ -f "settings.gradle" ] && \
              [ -f "app/build.gradle" ]; then
-            PROJECT="."
+            PROJECT_DIR="."
           fi
 
-          # If only ZIP exists, extract it
-          if [ -z "$PROJECT" ]; then
+          # Search ZIP if project is not already extracted
+          if [ -z "$PROJECT_DIR" ]; then
 
-            ZIP_FILE=$(find . -maxdepth 3 -type f \
+            ZIP_FILE=$(find . \
+              -maxdepth 3 \
+              -type f \
               -name "*.zip" \
-              ! -path "./.git/*" | head -n 1)
+              ! -path "./.git/*" \
+              | head -n 1)
 
             if [ -z "$ZIP_FILE" ]; then
-              echo "ERROR: Android project/ZIP not found."
+              echo "ERROR: Android project or ZIP not found."
               exit 1
             fi
 
-            echo "ZIP found: $ZIP_FILE"
+            echo "Found ZIP: $ZIP_FILE"
 
             rm -rf extracted
             mkdir -p extracted
 
             unzip -q "$ZIP_FILE" -d extracted
 
-            PROJECT=$(find extracted -type f \
+            PROJECT_DIR=$(find extracted \
+              -type f \
               -name "settings.gradle" \
-              -print -quit | xargs -r dirname)
-
+              -print -quit \
+              | xargs -r dirname)
           fi
 
-          if [ -z "$PROJECT" ]; then
+          if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: settings.gradle not found."
             exit 1
           fi
 
-          if [ ! -f "$PROJECT/app/build.gradle" ]; then
+          if [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
             echo "ERROR: app/build.gradle not found."
             exit 1
           fi
 
-          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "================================"
+          echo "======================================"
           echo "ANDROID PROJECT FOUND"
-          echo "$PROJECT"
-          echo "================================"
+          echo "$PROJECT_DIR"
+          echo "======================================"
 
 
-      # --------------------------------------------------
+      # ==============================
       # 3. JAVA 17
-      # --------------------------------------------------
+      # ==============================
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -97,104 +102,110 @@ jobs:
           java-version: "17"
 
 
-      # --------------------------------------------------
-      # 4. USE GITHUB PREINSTALLED ANDROID SDK
-      #    NO setup-android@v3
-      # --------------------------------------------------
+      # ==============================
+      # 4. ANDROID SDK
+      # NO setup-android@v3
+      # ==============================
       - name: Prepare Android SDK
         shell: bash
         run: |
           set -e
 
-          export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
 
-          echo "ANDROID_HOME=$ANDROID_HOME"
-
-          if [ ! -d "$ANDROID_HOME" ]; then
-            echo "ERROR: Android SDK not available."
+          if [ -z "$ANDROID_HOME" ]; then
+            echo "ERROR: Android SDK path not found."
             exit 1
           fi
 
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
 
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-              -type f -name sdkmanager -print -quit || true)
+          if command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          else
+            SDKMANAGER=$(find "$ANDROID_HOME" \
+              -type f \
+              -name "sdkmanager" \
+              -print -quit)
           fi
 
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+          if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager not found."
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          echo "Using sdkmanager: $SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
           "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;35.0.0"
 
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/build-tools/35.0.0" >> "$GITHUB_PATH"
 
 
-      # --------------------------------------------------
-      # 5. GRADLE
-      # --------------------------------------------------
+      # ==============================
+      # 5. GRADLE 8.10.2
+      # ==============================
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
 
 
-      # --------------------------------------------------
-      # 6. KEEP PORTRAIT + SAFE SCREEN AREA
-      # --------------------------------------------------
-      - name: Apply safe portrait configuration
+      # ==============================
+      # 6. FIX KOTLIN DUPLICATE CLASSES
+      # ==============================
+      - name: Fix Kotlin dependency conflicts
         shell: bash
         run: |
           set -e
 
-          MANIFEST="$PROJECT_DIR/app/src/main/AndroidManifest.xml"
-
-          if [ -f "$MANIFEST" ]; then
-
-            python3 - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
           import os
-          import re
 
-          p = Path(os.environ["PROJECT_DIR"]) / \
-              "app/src/main/AndroidManifest.xml"
+          project = Path(os.environ["PROJECT_DIR"])
 
-          s = p.read_text()
+          candidates = [
+              project / "build.gradle",
+              project / "app" / "build.gradle"
+          ]
 
-          # Keep portrait orientation
-          s = re.sub(
-              r'android:screenOrientation="[^"]*"',
-              'android:screenOrientation="portrait"',
-              s
-          )
+          root = project / "build.gradle"
 
-          if "android:screenOrientation=" not in s:
-              s = s.replace(
-                  "<activity",
-                  '<activity android:screenOrientation="portrait"',
-                  1
-              )
+          if root.exists():
+              text = root.read_text()
 
-          p.write_text(s)
-          print("Portrait configuration kept.")
+              fix = r'''
+
+          // Kotlin dependency compatibility
+          allprojects {
+              configurations.configureEach {
+                  resolutionStrategy.eachDependency { details ->
+                      if (details.requested.group == "org.jetbrains.kotlin") {
+                          details.useVersion("1.8.22")
+                      }
+                  }
+              }
+          }
+          '''
+
+              if "Kotlin dependency compatibility" not in text:
+                  text += fix
+                  root.write_text(text)
+
+          print("Kotlin dependency compatibility configured.")
           PY
 
-          fi
 
-
-      # --------------------------------------------------
+      # ==============================
       # 7. CREATE RELEASE KEY
-      # --------------------------------------------------
+      # ==============================
       - name: Create release signing key
         shell: bash
         run: |
@@ -217,10 +228,10 @@ jobs:
           echo "RELEASE_KEY_PASSWORD=WaterSortJungleKey" >> "$GITHUB_ENV"
 
 
-      # --------------------------------------------------
-      # 8. CONFIGURE SIGNING
-      # --------------------------------------------------
-      - name: Configure release signing
+      # ==============================
+      # 8. ADD RELEASE SIGNING
+      # ==============================
+      - name: Configure APK signing
         shell: bash
         run: |
           set -e
@@ -228,84 +239,63 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import os
-          import re
 
-          p = Path(os.environ["PROJECT_DIR"]) / \
-              "app/build.gradle"
+          project = Path(os.environ["PROJECT_DIR"])
+          gradle_file = project / "app" / "build.gradle"
 
-          s = p.read_text()
+          text = gradle_file.read_text()
 
-          if "signingConfigs" not in s:
+          if "Water Sort Jungle Indus Signing" not in text:
 
-              s = s.replace(
-                  "android {",
-                  """android {
+              text += r'''
 
+          // Water Sort Jungle Indus Signing
+          android {
               signingConfigs {
-                  release {
+                  indusRelease {
                       storeFile file("../signing/water-sort-jungle-release.jks")
                       storePassword System.getenv("RELEASE_STORE_PASSWORD")
                       keyAlias System.getenv("RELEASE_KEY_ALIAS")
                       keyPassword System.getenv("RELEASE_KEY_PASSWORD")
                   }
               }
-              """,
-                  1
-              )
 
-          if "signingConfig signingConfigs.release" not in s:
-
-              # Put signing config inside release buildType
-              if "buildTypes" in s and "release {" in s:
-
-                  s = s.replace(
-                      "release {",
-                      """release {
-                      signingConfig signingConfigs.release""",
-                      1
-                  )
-
-              else:
-
-                  s += """
-
-          android {
               buildTypes {
                   release {
-                      signingConfig signingConfigs.release
+                      signingConfig signingConfigs.indusRelease
                   }
               }
           }
-          """
+          '''
 
-          p.write_text(s)
+              gradle_file.write_text(text)
 
           print("Release signing configured.")
           PY
 
 
-      # --------------------------------------------------
+      # ==============================
       # 9. CLEAN
-      # --------------------------------------------------
-      - name: Clean
+      # ==============================
+      - name: Clean project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           gradle clean --no-daemon
 
 
-      # --------------------------------------------------
+      # ==============================
       # 10. BUILD RELEASE APK
-      # --------------------------------------------------
+      # ==============================
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          gradle assembleRelease --no-daemon
+          gradle assembleRelease --no-daemon --stacktrace
 
 
-      # --------------------------------------------------
+      # ==============================
       # 11. FIND APK
-      # --------------------------------------------------
-      - name: Find APK
+      # ==============================
+      - name: Find generated APK
         shell: bash
         run: |
           set -e
@@ -317,48 +307,50 @@ jobs:
             -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated."
+            echo "ERROR: Release APK was not generated."
             exit 1
           fi
 
-          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
-          echo "================================"
-          echo "APK FOUND"
+          echo "======================================"
+          echo "APK GENERATED SUCCESSFULLY"
           echo "$APK"
-          echo "================================"
+          echo "======================================"
 
 
-      # --------------------------------------------------
-      # 12. VERIFY REAL APK
-      # --------------------------------------------------
+      # ==============================
+      # 12. VERIFY APK FORMAT
+      # ==============================
       - name: Verify APK
         shell: bash
         run: |
           set -e
 
-          echo "Checking APK..."
+          echo "Checking APK file..."
 
-          test -s "$APK"
+          test -s "$APK_PATH"
 
-          # APK is a ZIP container
-          unzip -t "$APK" >/dev/null
+          echo "Checking ZIP/APK structure..."
+          unzip -t "$APK_PATH" >/dev/null
 
-          # Verify Android signature
+          echo "Checking Android signature..."
+
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
             verify \
             --verbose \
-            "$APK"
+            "$APK_PATH"
 
-          echo "================================"
-          echo "APK FORMAT: OK"
-          echo "APK SIGNATURE: OK"
-          echo "================================"
+          echo "======================================"
+          echo "APK FORMAT       : OK"
+          echo "APK SIGNATURE    : OK"
+          echo "APK VERIFICATION : OK"
+          echo "======================================"
 
 
-      # --------------------------------------------------
-      # 13. FINAL INDUS APK
-      # --------------------------------------------------
+      # ==============================
+      # 13. PREPARE INDUS APK
+      # ==============================
       - name: Prepare Indus APK
         shell: bash
         run: |
@@ -366,18 +358,19 @@ jobs:
 
           mkdir -p artifacts
 
-          cp "$APK" \
+          cp "$APK_PATH" \
             "artifacts/Water-Sort-Jungle-Indus.apk"
+
+          echo "Final APK:"
+          ls -lh "artifacts/Water-Sort-Jungle-Indus.apk"
 
           file "artifacts/Water-Sort-Jungle-Indus.apk"
 
-          ls -lh "artifacts/Water-Sort-Jungle-Indus.apk"
 
-
-      # --------------------------------------------------
-      # 14. UPLOAD FINAL APK
-      # --------------------------------------------------
-      - name: Upload final APK
+      # ==============================
+      # 14. UPLOAD APK
+      # ==============================
+      - name: Upload Indus APK
         uses: actions/upload-artifact@v4
         with:
           name: Water-Sort-Jungle-Indus-APK
